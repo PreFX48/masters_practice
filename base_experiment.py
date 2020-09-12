@@ -15,7 +15,8 @@ class BaseExperiment:
     KERAS_EPOCHS = 16
     POSITIVE_STEPS = [9999999999]
     NEGATIVE_STEPS = [9999999999]
-    ITERATIONS = 3
+    ITERATIONS = 5
+    PLOT_FIG_SIZE = (9, 12)
 
     def get_dataset(self):
         raise NotImplementedError()
@@ -36,6 +37,7 @@ class BaseExperiment:
         catboost_metrics = self.run_catboost()
         keras_metrics = self.run_keras()
         self.plot_metrics(catboost_metrics, keras_metrics)
+        self.plot_metrics_diff(catboost_metrics, keras_metrics)
         self.write_metrics(catboost_metrics, keras_metrics)
 
     def run_catboost(self):
@@ -149,12 +151,12 @@ class BaseExperiment:
 
     def plot_metrics(self, catboost_metrics, keras_metrics):
         cmap = np.concatenate([
-            catboost_metrics['accuracy'],
+            catboost_metrics['roc_auc'],
             np.full((1, len(self.POSITIVE_STEPS)), min(catboost_metrics['roc_auc'].min(), keras_metrics['roc_auc'].min())),
-            keras_metrics['accuracy']
+            keras_metrics['roc_auc']
         ])
-        plt.figure(figsize=(9, 12))
-        plt.title(f'Accuracy', fontsize=18)
+        plt.figure(figsize=self.PLOT_FIG_SIZE)
+        plt.title(f'AUC', fontsize=18)
         plt.imshow(cmap, cmap=plt.get_cmap("PiYG", 7))
         plt.xlabel('Positives', fontsize=14)
         plt.ylabel('Negatives', fontsize=14)
@@ -165,12 +167,12 @@ class BaseExperiment:
         )
         for i in range(len(self.NEGATIVE_STEPS)):
             for j in range(len(self.POSITIVE_STEPS)):
-                plt.text(j-0.45, i-0.25, f'true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}')
-                plt.text(j-0.45, i, f"pred={round(catboost_metrics['mean_prediction'][i, j], 2)}")
-                plt.text(j-0.45, i+0.25, f"auc={round(catboost_metrics['roc_auc'][i, j], 3)}")
-                plt.text(j-0.45, i-0.25 + len(self.NEGATIVE_STEPS) + 1, f"true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}")
-                plt.text(j-0.45, i + len(self.NEGATIVE_STEPS) + 1, f"pred={round(keras_metrics['mean_prediction'][i, j], 2)}")
-                plt.text(j-0.45, i+0.25 + len(self.NEGATIVE_STEPS) + 1, f"auc={round(keras_metrics['roc_auc'][i, j], 3)}")
+                plt.text(j-0.45, i-0.15, f'true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}')
+                # plt.text(j-0.45, i, f"pred={round(catboost_metrics['mean_prediction'][i, j], 2)}")
+                plt.text(j-0.45, i+0.15, f"auc={round(catboost_metrics['roc_auc'][i, j], 3)}")
+                plt.text(j-0.45, i-0.15 + len(self.NEGATIVE_STEPS) + 1, f"true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}")
+                # plt.text(j-0.45, i + len(self.NEGATIVE_STEPS) + 1, f"pred={round(keras_metrics['mean_prediction'][i, j], 2)}")
+                plt.text(j-0.45, i+0.15 + len(self.NEGATIVE_STEPS) + 1, f"auc={round(keras_metrics['roc_auc'][i, j], 3)}")
         plt.show()
 
     def write_metrics(self, catboost_metrics, keras_metrics):
@@ -181,4 +183,39 @@ class BaseExperiment:
         }
         with open(filename, 'wb') as f:
             pickle.dump(result, f)
+
+    def plot_metrics_diff(self, catboost_metrics, keras_metrics):
+        diff = (catboost_metrics['roc_auc'] - keras_metrics['roc_auc']) / keras_metrics['roc_auc']
+        min_intensity = 0.5
+        clip_threshold = 0.7
+        diff_rgb = np.full((diff.shape[0], diff.shape[1], 3), 1.0)
+        for i in range(diff_rgb.shape[0]):
+            for j in range(diff_rgb.shape[1]):
+                clipped = max(min(diff[i, j], clip_threshold), -clip_threshold)
+                coef = (clip_threshold - abs(clipped)) / clip_threshold
+                blue = 1 * coef + min_intensity * (1 - coef)
+                if clipped > 0:
+                    green = 1
+                    red = 1 * coef + min_intensity * (1 - coef)
+                else:
+                    green = 1 * coef + min_intensity * (1 - coef)
+                    red = 1
+                diff_rgb[i, j, 0] = red
+                diff_rgb[i, j, 1] = green
+                diff_rgb[i, j, 2] = blue
+        plt.figure(figsize=(self.PLOT_FIG_SIZE[0], self.PLOT_FIG_SIZE[1]/2))
+        plt.title('Catboost over Keras', fontsize=18)
+        # plt.imshow(diff, cmap=plt.get_cmap("PiYG", 7))
+        plt.imshow(diff_rgb)
+        plt.xlabel('Positives', fontsize=14)
+        plt.ylabel('Negatives', fontsize=14)
+        plt.xticks(range(len(self.POSITIVE_STEPS)), self.POSITIVE_STEPS)
+        plt.yticks(range(len(self.NEGATIVE_STEPS)), self.NEGATIVE_STEPS)
+        for i in range(len(self.NEGATIVE_STEPS)):
+            for j in range(len(self.POSITIVE_STEPS)):
+                plt.text(j-0.45, i-0.15, f'true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}')
+                plt.text(j-0.45, i+0.15, f"auc={'+' if diff[i, j] > 0 else ''}{round(diff[i, j]*100, 1)}%")
+        plt.show()
+
+
 
