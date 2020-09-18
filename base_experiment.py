@@ -3,12 +3,14 @@ import numpy as np
 from catboost import CatBoostClassifier, datasets
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import log_loss, accuracy_score, roc_auc_score
 from tqdm.notebook import tqdm, trange
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
 import pickle
+import sys
+import telegram_send
 
 
 # def iterate_keras_models(layers_range, layer_sizes, dropouts, optimizers=['adam'])
@@ -25,7 +27,10 @@ class BaseExperiment:
     KERAS_LAYERS_RANGE = [2, 3, 4]
     KERAS_LAYER_SIZE_RANGE = [32, 64, 128, 160]
     KERAS_DROPOUT_RANGE = [0.2, 0.35, 0.5]
+    KERAS_ACTIVATIONS = ['relu', 'tanh']
     KERAS_OPTIMIZERS_LIST = ['adam']  # ['adam', 'adadelta', 'rmsprop']  # in most cases adam was better
+    LOG_TO_STDOUT = False
+    LOG_TO_TELEGRAM = True
 
     def get_dataset(self):
         raise NotImplementedError()
@@ -48,17 +53,21 @@ class BaseExperiment:
         keras_metrics = self.run_keras(keras_params)
         self.plot_metrics(catboost_metrics, keras_metrics)
         self.plot_metrics_diff(catboost_metrics, keras_metrics)
+        self.print_summary(catboost_metrics, keras_metrics)
         self.write_metrics(catboost_metrics, keras_metrics)
 
     def run_catboost(self):
         dataset = self.get_dataset()
         metrics = {
+            'loss': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'accuracy': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'roc_auc': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'mean_prediction': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
         }
         for i, positive in enumerate(tqdm(self.POSITIVE_STEPS, desc='Catboost')):
+            self.log_progress(f'{i}/{len(self.POSITIVE_STEPS)}')
             for j, negative in enumerate(tqdm(self.NEGATIVE_STEPS, leave=False)):
+                loss = 0.0
                 acc = 0.0
                 roc_auc = 0.0
                 mean_pred = 0.0
@@ -80,10 +89,12 @@ class BaseExperiment:
                         use_best_model=True,
                         plot=False,
                     )
+                    loss += log_loss(y_valid, cbc_1.predict_proba(X_valid)[:, 1])
                     acc += accuracy_score(y_valid, cbc_1.predict(X_valid))
                     roc_auc += roc_auc_score(y_valid, cbc_1.predict_proba(X_valid)[:, 1])
                     mean_pred += cbc_1.predict(X_valid).mean()
 
+                metrics['loss'][j, i] = loss / self.ITERATIONS
                 metrics['accuracy'][j, i] = acc / self.ITERATIONS
                 metrics['roc_auc'][j, i] = roc_auc / self.ITERATIONS
                 metrics['mean_prediction'][j, i] = mean_pred / self.ITERATIONS
@@ -92,12 +103,15 @@ class BaseExperiment:
     def run_keras(self, model_hyperparameters):
         dataset = self.transform_dataset_for_keras(self.get_dataset())
         metrics = {
+            'loss': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'accuracy': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'roc_auc': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'mean_prediction': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
         }
         for i, positive in enumerate(tqdm(self.POSITIVE_STEPS, desc='Keras')):
+            self.log_progress(f'{i}/{len(self.POSITIVE_STEPS)}')
             for j, negative in enumerate(tqdm(self.NEGATIVE_STEPS, leave=False)):
+                loss = 0.0
                 acc = 0.0
                 roc_auc = 0.0
                 mean_pred = 0.0
@@ -123,10 +137,12 @@ class BaseExperiment:
                         callbacks=callbacks, verbose=False,
                     )
                     test_loss, test_acc, test_auc = model.evaluate(X_valid,  y_valid, verbose=0)
+                    loss += test_loss
                     acc += test_acc
                     roc_auc += test_auc
                     mean_pred += model.predict_classes(X_valid).mean()
-                    
+                
+                metrics['loss'][j, i] = loss / self.ITERATIONS
                 metrics['accuracy'][j, i] = acc / self.ITERATIONS
                 metrics['roc_auc'][j, i] = roc_auc / self.ITERATIONS
                 metrics['mean_prediction'][j, i] = mean_pred / self.ITERATIONS
@@ -157,6 +173,7 @@ class BaseExperiment:
 
     def tune_keras_hyperparameters(self):
         dataset = self.transform_dataset_for_keras(self.get_dataset())
+        loss_by_params = {}
         accuracy_by_params = {}
         roc_auc_by_params = {}
         layer_size_sets = []
@@ -172,37 +189,43 @@ class BaseExperiment:
                 if len(layer_sizes) >= 3 and layer_sizes[-2] > layer_sizes[-3]:
                     continue  # small optimization: we believe that the network should become more "narrow" at the end
                 layer_size_sets.append(layer_sizes)
-        for layer_sizes in tqdm(layer_size_sets, desc='Tuning network layers'):
-            for dropout in self.KERAS_DROPOUT_RANGE:
-                for optimizer in self.KERAS_OPTIMIZERS_LIST:
-                    params_key = (layer_sizes, dropout, optimizer)
-                    acc = 0.0
-                    roc_auc = 0.0
-                    for iteration in range(self.KERAS_HYPERPARAMETER_ITERATIONS):
-                        model = self.get_compiled_keras_model_from_parameters(layer_sizes, dropout, optimizer)
-                        X, y, _ = self.get_balanced_dataset(dataset, 9999999999, 9999999999)
-                        X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.25)
-                        callbacks = [
-                            tf.keras.callbacks.EarlyStopping(
-                                monitor="val_loss",
-                                min_delta=0,
-                                patience=0,
-                                verbose=0,
-                                mode="auto",
-                                baseline=None,
-                                restore_best_weights=False,
+        for _iter, layer_sizes in enumerate(tqdm(layer_size_sets, desc='Tuning network layers')):
+            if _iter % 4 == 0:
+                self.log_progress(f'{_iter}/{len(layer_size_sets)}')
+            for activation in self.KERAS_ACTIVATIONS:
+                for dropout in self.KERAS_DROPOUT_RANGE:
+                    for optimizer in self.KERAS_OPTIMIZERS_LIST:
+                        params_key = (layer_sizes, activation, dropout, optimizer)
+                        loss = 0.0
+                        acc = 0.0
+                        roc_auc = 0.0
+                        for iteration in range(self.KERAS_HYPERPARAMETER_ITERATIONS):
+                            model = self.get_compiled_keras_model_from_parameters(layer_sizes, activation, dropout, optimizer)
+                            X, y, _ = self.get_balanced_dataset(dataset, 9999999999, 9999999999)
+                            X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.25)
+                            callbacks = [
+                                tf.keras.callbacks.EarlyStopping(
+                                    monitor="val_loss",
+                                    min_delta=0,
+                                    patience=0,
+                                    verbose=0,
+                                    mode="auto",
+                                    baseline=None,
+                                    restore_best_weights=False,
+                                )
+                            ]
+                            model.fit(
+                                X_train, y_train,
+                                epochs=self.KERAS_EPOCHS, validation_data=(X_valid, y_valid),
+                                callbacks=callbacks, verbose=False,
                             )
-                        ]
-                        model.fit(
-                            X_train, y_train,
-                            epochs=self.KERAS_EPOCHS, validation_data=(X_valid, y_valid),
-                            callbacks=callbacks, verbose=False,
-                        )
-                        test_loss, test_acc, test_auc = model.evaluate(X_valid,  y_valid, verbose=0)
-                        acc += test_acc
-                        roc_auc += test_auc
-                    accuracy_by_params[params_key] = acc / self.KERAS_HYPERPARAMETER_ITERATIONS
-                    roc_auc_by_params[params_key] = roc_auc / self.KERAS_HYPERPARAMETER_ITERATIONS
+                            test_loss, test_acc, test_auc = model.evaluate(X_valid,  y_valid, verbose=0)
+                            loss += test_loss
+                            acc += test_acc
+                            roc_auc += test_auc
+                        loss_by_params[params_key] = loss / self.KERAS_HYPERPARAMETER_ITERATIONS
+                        accuracy_by_params[params_key] = acc / self.KERAS_HYPERPARAMETER_ITERATIONS
+                        roc_auc_by_params[params_key] = roc_auc / self.KERAS_HYPERPARAMETER_ITERATIONS
 
         ordered_params = sorted(roc_auc_by_params.items(), key=lambda item: item[1], reverse=True)
         print('BEST NETWORK PARAMETERS:')
@@ -211,10 +234,10 @@ class BaseExperiment:
             print(f'{params_key}: auc={roc_auc:.3f}, acc={accuracy_by_params[params_key]:.3f}')
         return ordered_params[0][0]
 
-    def get_compiled_keras_model_from_parameters(self, layer_sizes, dropout, optimizer):
+    def get_compiled_keras_model_from_parameters(self, layer_sizes, activation, dropout, optimizer):
         layers = []
         for layer_size in layer_sizes:
-            layers.append(keras.layers.Dense(layer_size, activation='relu'))
+            layers.append(keras.layers.Dense(layer_size, activation=activation))
             if dropout > 0:
                 layers.append(keras.layers.Dropout(dropout))
         layers.append(keras.layers.Dense(1, activation='sigmoid'))
@@ -278,7 +301,6 @@ class BaseExperiment:
                 diff_rgb[i, j, 2] = blue
         plt.figure(figsize=(self.PLOT_FIG_SIZE[0], self.PLOT_FIG_SIZE[1]/2))
         plt.title('Catboost over Keras', fontsize=18)
-        # plt.imshow(diff, cmap=plt.get_cmap("PiYG", 7))
         plt.imshow(diff_rgb)
         plt.xlabel('Positives', fontsize=14)
         plt.ylabel('Negatives', fontsize=14)
@@ -289,6 +311,33 @@ class BaseExperiment:
                 plt.text(j-0.45, i-0.15, f'true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}')
                 plt.text(j-0.45, i+0.15, f"auc={'+' if diff[i, j] > 0 else ''}{round(diff[i, j]*100, 1)}%")
         plt.show()
+
+    def print_summary(self, catboost_metrics, keras_metrics):
+        print('---- METRICS SUMMARY ----')
+        for key in sorted(catboost_metrics):
+            if key == 'mean_prediction':
+                continue  # not a very intereting metric
+            catboost_value = catboost_metrics[key][-1, -1]
+            keras_value = keras_metrics[key][-1, -1]
+            catboost_diff = (catboost_value - keras_value) / max(keras_value, 1e-6) * 100
+            catboost_diff_sign = '+' if catboost_diff >= 0.0 else ''
+            keras_diff = (keras_value - catboost_value) / max(catboost_value, 1e-6) * 100
+            keras_diff_sign = '+' if keras_diff >= 0.0 else ''
+            print(f'{key:>10}: catboost={catboost_value:.3f} ({catboost_diff_sign}{catboost_diff:.2f}%), keras={keras_value:.3f} ({keras_diff_sign}{keras_diff:.2f}%)\n')
+        print('-------------------------')
+
+    def log_progress(self, message):
+        caller_class = self.__class__.__name__
+        caller_fn = sys._getframe().f_back.f_code.co_name
+        full_message = f'{caller_class}.{caller_fn}: {message}'
+        if self.LOG_TO_STDOUT:
+            print(full_message)
+        if self.LOG_TO_TELEGRAM:
+            try:
+                telegram_send.send(messages=[full_message])
+            except Exception as exc:
+                print(exc)
+
 
 
 
