@@ -1,19 +1,55 @@
 import itertools
+import multiprocessing
 import numpy as np
 from catboost import CatBoostClassifier, datasets
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import log_loss, accuracy_score, roc_auc_score
-from tqdm.notebook import tqdm, trange
+from tqdm import tqdm, trange
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
 import pickle
 import sys
 import telegram_send
+import os
 
 
-# def iterate_keras_models(layers_range, layer_sizes, dropouts, optimizers=['adam'])
+def test_keras_parameters(all_params):
+    self, dataset, params = all_params
+    loss = 0.0
+    acc = 0.0
+    roc_auc = 0.0
+    for iteration in range(self.KERAS_HYPERPARAMETER_ITERATIONS):
+        model = self.get_compiled_keras_model_from_parameters(*params)
+        X, y, _ = self.get_balanced_dataset(dataset, 9999999999, 9999999999)
+        X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.25)
+        callbacks = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                min_delta=0,
+                patience=0,
+                verbose=0,
+                mode="auto",
+                baseline=None,
+                restore_best_weights=False,
+            )
+        ]
+        model.fit(
+            X_train, y_train,
+            epochs=self.KERAS_EPOCHS, validation_data=(X_valid, y_valid),
+            callbacks=callbacks, verbose=False,
+        )
+        test_loss, test_acc, test_auc = model.evaluate(X_valid,  y_valid, verbose=0)
+        loss += test_loss
+        acc += test_acc
+        roc_auc += test_auc
+    metrics = (
+        loss / self.KERAS_HYPERPARAMETER_ITERATIONS,
+        acc / self.KERAS_HYPERPARAMETER_ITERATIONS,
+        roc_auc / self.KERAS_HYPERPARAMETER_ITERATIONS,
+    )
+    return params, metrics
 
 
 class BaseExperiment:
@@ -23,6 +59,7 @@ class BaseExperiment:
     NEGATIVE_STEPS = [9999999999]
     ITERATIONS = 5
     PLOT_FIG_SIZE = (9, 12)
+    KERAS_HYPERPARAMETER_WORKERS = 8
     KERAS_HYPERPARAMETER_ITERATIONS = 4
     KERAS_LAYERS_RANGE = [2, 3, 4]
     KERAS_LAYER_SIZE_RANGE = [32, 64, 128, 160]
@@ -55,6 +92,7 @@ class BaseExperiment:
         self.plot_metrics_diff(catboost_metrics, keras_metrics)
         self.print_summary(catboost_metrics, keras_metrics)
         self.write_metrics(catboost_metrics, keras_metrics)
+        self.log_progress('Finished')
 
     def run_catboost(self):
         dataset = self.get_dataset()
@@ -176,7 +214,7 @@ class BaseExperiment:
         loss_by_params = {}
         accuracy_by_params = {}
         roc_auc_by_params = {}
-        layer_size_sets = []
+        parameter_tuples = []
         for layers_num in self.KERAS_LAYERS_RANGE:
             for layer_sizes in itertools.product(self.KERAS_LAYER_SIZE_RANGE, repeat=layers_num):
                 # In most cases the larger first two layers were – there better, so we cut small layers for faster tuning
@@ -188,44 +226,23 @@ class BaseExperiment:
                     continue  # small optimization: we believe that the network should become more "narrow" at the end
                 if len(layer_sizes) >= 3 and layer_sizes[-2] > layer_sizes[-3]:
                     continue  # small optimization: we believe that the network should become more "narrow" at the end
-                layer_size_sets.append(layer_sizes)
-        for _iter, layer_sizes in enumerate(tqdm(layer_size_sets, desc='Tuning network layers')):
-            if _iter % 4 == 0:
-                self.log_progress(f'{_iter}/{len(layer_size_sets)}')
-            for activation in self.KERAS_ACTIVATIONS:
-                for dropout in self.KERAS_DROPOUT_RANGE:
-                    for optimizer in self.KERAS_OPTIMIZERS_LIST:
-                        params_key = (layer_sizes, activation, dropout, optimizer)
-                        loss = 0.0
-                        acc = 0.0
-                        roc_auc = 0.0
-                        for iteration in range(self.KERAS_HYPERPARAMETER_ITERATIONS):
-                            model = self.get_compiled_keras_model_from_parameters(layer_sizes, activation, dropout, optimizer)
-                            X, y, _ = self.get_balanced_dataset(dataset, 9999999999, 9999999999)
-                            X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.25)
-                            callbacks = [
-                                tf.keras.callbacks.EarlyStopping(
-                                    monitor="val_loss",
-                                    min_delta=0,
-                                    patience=0,
-                                    verbose=0,
-                                    mode="auto",
-                                    baseline=None,
-                                    restore_best_weights=False,
-                                )
-                            ]
-                            model.fit(
-                                X_train, y_train,
-                                epochs=self.KERAS_EPOCHS, validation_data=(X_valid, y_valid),
-                                callbacks=callbacks, verbose=False,
-                            )
-                            test_loss, test_acc, test_auc = model.evaluate(X_valid,  y_valid, verbose=0)
-                            loss += test_loss
-                            acc += test_acc
-                            roc_auc += test_auc
-                        loss_by_params[params_key] = loss / self.KERAS_HYPERPARAMETER_ITERATIONS
-                        accuracy_by_params[params_key] = acc / self.KERAS_HYPERPARAMETER_ITERATIONS
-                        roc_auc_by_params[params_key] = roc_auc / self.KERAS_HYPERPARAMETER_ITERATIONS
+                for activation in self.KERAS_ACTIVATIONS:
+                    for dropout in self.KERAS_DROPOUT_RANGE:
+                        for optimizer in self.KERAS_OPTIMIZERS_LIST:
+                            params_key = (layer_sizes, activation, dropout, optimizer)
+                            parameter_tuples.append(params_key)
+
+        with multiprocessing.Pool(processes=self.KERAS_HYPERPARAMETER_WORKERS) as pool:
+            all_param_tuples = [(self, dataset, param_tuple) for param_tuple in parameter_tuples]
+            results = pool.imap_unordered(test_keras_parameters, all_param_tuples)
+            for _i, result in enumerate(tqdm(results, total=len(parameter_tuples), desc='Tuning Keras')):
+                if _i % 24 == 0:
+                    self.log_progress(f'{_i}/{len(parameter_tuples)}')
+                params_key, metrics = result
+                loss, acc, auc = metrics
+                loss_by_params[params_key] = loss
+                accuracy_by_params[params_key] = acc
+                roc_auc_by_params[params_key] = auc
 
         ordered_params = sorted(roc_auc_by_params.items(), key=lambda item: item[1], reverse=True)
         print('BEST NETWORK PARAMETERS:')
@@ -246,6 +263,10 @@ class BaseExperiment:
         return model
 
     def plot_metrics(self, catboost_metrics, keras_metrics):
+        if not os.path.exists('experiments'):
+            os.mkdir('experiments')
+        if not os.path.exists(f'experiments/plots'):
+            os.mkdir(f'experiments/plots')
         cmap = np.concatenate([
             catboost_metrics['roc_auc'],
             np.full((1, len(self.POSITIVE_STEPS)), min(catboost_metrics['roc_auc'].min(), keras_metrics['roc_auc'].min())),
@@ -269,10 +290,14 @@ class BaseExperiment:
                 plt.text(j-0.45, i-0.15 + len(self.NEGATIVE_STEPS) + 1, f"true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}")
                 # plt.text(j-0.45, i + len(self.NEGATIVE_STEPS) + 1, f"pred={round(keras_metrics['mean_prediction'][i, j], 2)}")
                 plt.text(j-0.45, i+0.15 + len(self.NEGATIVE_STEPS) + 1, f"auc={round(keras_metrics['roc_auc'][i, j], 3)}")
-        plt.show()
+        plt.savefig(f'experiments/plots/{self.__class__.__name__}_stacked.png')
 
     def write_metrics(self, catboost_metrics, keras_metrics):
-        filename = f'{self.__class__.__name__}_metrics.pickle'
+        if not os.path.exists('experiments'):
+            os.mkdir('experiments')
+        if not os.path.exists('experiments/metrics'):
+            os.mkdir('experiments/metrics')
+        filename = f'experiments/metrics/{self.__class__.__name__}.pickle'
         result = {
             'catboost': catboost_metrics,
             'keras': keras_metrics,
@@ -281,6 +306,10 @@ class BaseExperiment:
             pickle.dump(result, f)
 
     def plot_metrics_diff(self, catboost_metrics, keras_metrics):
+        if not os.path.exists('experiments'):
+            os.mkdir('experiments')
+        if not os.path.exists('experiments/plots'):
+            os.mkdir('experiments/plots')
         diff = (catboost_metrics['roc_auc'] - keras_metrics['roc_auc']) / keras_metrics['roc_auc']
         min_intensity = 0.5
         clip_threshold = 0.7
@@ -310,21 +339,29 @@ class BaseExperiment:
             for j in range(len(self.POSITIVE_STEPS)):
                 plt.text(j-0.45, i-0.15, f'true+={round(self.POSITIVE_STEPS[j] / (self.POSITIVE_STEPS[j] + self.NEGATIVE_STEPS[i]), 2)}')
                 plt.text(j-0.45, i+0.15, f"auc={'+' if diff[i, j] > 0 else ''}{round(diff[i, j]*100, 1)}%")
-        plt.show()
+        plt.savefig(f'experiments/plots/{self.__class__.__name__}_diff.png')
 
     def print_summary(self, catboost_metrics, keras_metrics):
-        print('---- METRICS SUMMARY ----')
-        for key in sorted(catboost_metrics):
-            if key == 'mean_prediction':
-                continue  # not a very intereting metric
-            catboost_value = catboost_metrics[key][-1, -1]
-            keras_value = keras_metrics[key][-1, -1]
-            catboost_diff = (catboost_value - keras_value) / max(keras_value, 1e-6) * 100
-            catboost_diff_sign = '+' if catboost_diff >= 0.0 else ''
-            keras_diff = (keras_value - catboost_value) / max(catboost_value, 1e-6) * 100
-            keras_diff_sign = '+' if keras_diff >= 0.0 else ''
-            print(f'{key:>10}: catboost={catboost_value:.3f} ({catboost_diff_sign}{catboost_diff:.2f}%), keras={keras_value:.3f} ({keras_diff_sign}{keras_diff:.2f}%)\n')
-        print('-------------------------')
+        if not os.path.exists('experiments'):
+            os.mkdir('experiments')
+        if not os.path.exists('experiments/summaries'):
+            os.mkdir('experiments/summaries')
+        with open(f'experiments/summaries/{self.__class__.__name__}.txt', 'w') as f:
+            print('---- METRICS SUMMARY ----\n')
+            f.write('---- METRICS SUMMARY ----\n\n')
+            for key in sorted(catboost_metrics):
+                if key == 'mean_prediction':
+                    continue  # not a very intereting metric
+                catboost_value = catboost_metrics[key][-1, -1]
+                keras_value = keras_metrics[key][-1, -1]
+                catboost_diff = (catboost_value - keras_value) / max(keras_value, 1e-6) * 100
+                catboost_diff_sign = '+' if catboost_diff >= 0.0 else ''
+                keras_diff = (keras_value - catboost_value) / max(catboost_value, 1e-6) * 100
+                keras_diff_sign = '+' if keras_diff >= 0.0 else ''
+                print(f'{key:>10}: catboost={catboost_value:.3f} ({catboost_diff_sign}{catboost_diff:.2f}%), keras={keras_value:.3f} ({keras_diff_sign}{keras_diff:.2f}%)\n')
+                f.write(f'{key:>10}: catboost={catboost_value:.3f} ({catboost_diff_sign}{catboost_diff:.2f}%), keras={keras_value:.3f} ({keras_diff_sign}{keras_diff:.2f}%)\n\n')
+            print('-------------------------')
+            f.write('-------------------------\n')
 
     def log_progress(self, message):
         caller_class = self.__class__.__name__
