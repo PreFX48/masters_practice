@@ -66,6 +66,7 @@ class BaseExperiment:
     KERAS_DROPOUT_RANGE = [0.2, 0.35, 0.5]
     KERAS_ACTIVATIONS = ['relu', 'tanh']
     KERAS_OPTIMIZERS_LIST = ['adam']  # ['adam', 'adadelta', 'rmsprop']  # in most cases adam was better
+    USE_CTR = False
     LOG_TO_STDOUT = False
     LOG_TO_TELEGRAM = True
 
@@ -188,18 +189,44 @@ class BaseExperiment:
 
     def transform_dataset_for_keras(self, dataset):
         X, y, cat_features = dataset
+        numeric_features = [x for x in X.columns if x not in cat_features]
 
         columns_to_onehot_encode = [x for x in cat_features if X[x].nunique() <= self.KERAS_MAX_ONEHOT_VALUES]
-        columns_to_integer_encode = [x for x in cat_features if X[x].nunique() > self.KERAS_MAX_ONEHOT_VALUES]
+        if self.USE_CTR:
+            columns_to_ctr_encode = [x for x in cat_features if X[x].nunique() > self.KERAS_MAX_ONEHOT_VALUES]
+            columns_to_integer_encode = []
+        else:
+            columns_to_ctr_encode = []
+            columns_to_integer_encode = [x for x in cat_features if X[x].nunique() > self.KERAS_MAX_ONEHOT_VALUES]
+
+        new_ctr_features = []
+        ctr_combinations = [(column,) for column in columns_to_ctr_encode] + list(itertools.combinations(columns_to_ctr_encode, 2))
+        for column_set in ctr_combinations:
+            values = X[column_set[0]].astype('str')
+            if len(column_set) > 1:
+                for column in column_set[1:]:
+                    values += ';' + X[column].astype('str')
+            unique_counts = values.value_counts()
+            value_to_count = {value: count for (value, count) in zip(unique_counts.axes[0], unique_counts)}
+            new_column_name = '__'.join(column_set) + '__CTR'
+            new_ctr_features.append(new_column_name)
+            X[new_column_name] = 0.0
+            total_count = X.shape[0]
+            PRIOR = 0.5
+            for value, count in value_to_count.items():
+                X.loc[values == value, (new_column_name,)] = (count + PRIOR) / (total_count + 1)
+        X = X.drop(columns=columns_to_ctr_encode)
+
         for col in X.columns:
             if col in columns_to_integer_encode:
                 X[col] = X[col].astype('category').cat.codes.astype('float32')
-            if col not in cat_features or col in columns_to_integer_encode:
+            if col in numeric_features or col in columns_to_integer_encode or col in new_ctr_features:
                 if X[col].max() == X[col].min():
                     col_range = 1
                 else:
                     col_range = X[col].max() - X[col].min()
                 X[col] = (X[col] - X[col].min()) / col_range
+
         X = pd.get_dummies(X, columns=columns_to_onehot_encode)
 
         X = X.astype('float32')
@@ -234,7 +261,8 @@ class BaseExperiment:
 
         with multiprocessing.Pool(processes=self.KERAS_HYPERPARAMETER_WORKERS) as pool:
             all_param_tuples = [(self, dataset, param_tuple) for param_tuple in parameter_tuples]
-            results = pool.imap_unordered(test_keras_parameters, all_param_tuples)
+            # results = pool.imap_unordered(test_keras_parameters, all_param_tuples)
+            results = pool.map(test_keras_parameters, all_param_tuples)
             for _i, result in enumerate(tqdm(results, total=len(parameter_tuples), desc='Tuning Keras')):
                 if _i % 24 == 0:
                     self.log_progress(f'{_i}/{len(parameter_tuples)}')
