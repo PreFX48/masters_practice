@@ -1,3 +1,5 @@
+#!/home/vvsopov/anaconda3/bin/python
+
 from kick import KickExperiment
 
 

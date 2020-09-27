@@ -1,3 +1,5 @@
+#!/home/vvsopov/anaconda3/bin/python
+
 import numpy as np
 import pandas as pd
 from tensorflow import keras

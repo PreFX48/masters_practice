@@ -1,3 +1,5 @@
+#!/home/vvsopov/anaconda3/bin/python
+
 import numpy as np
 from catboost import datasets
 import pandas as pd
