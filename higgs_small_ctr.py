@@ -1,6 +1,6 @@
 #!/home/vvsopov/anaconda3/bin/python
 
-from higgs import HiggsSmallExperiment
+from higgs_small import HiggsSmallExperiment
 
 
 class HiggsSmallExperimentCtr(HiggsSmallExperiment):
