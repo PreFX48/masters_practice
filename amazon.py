@@ -13,7 +13,7 @@ class AmazonExperiment(BaseExperiment):
     PLOT_FIG_SIZE = (8, 10.67)
 
     def get_dataset(self):
-        train_df, _ = datasets.amazon()
+        train_df = pd.read_csv('amazon.csv')
 #         train_df = train_df[:500]
         y = train_df['ACTION']
         X = train_df.drop(columns='ACTION') # or X = train_df.drop('ACTION', axis=1)
