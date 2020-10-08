@@ -54,7 +54,7 @@ def test_keras_parameters(all_params):
 
 class BaseExperiment:
     KERAS_MAX_ONEHOT_VALUES = 50  # if unique(feature) < MAX_ONEHOT_VALUES, one-hot encoding, otherwise integer encoding
-    KERAS_EPOCHS = 16
+    KERAS_EPOCHS = 32
     POSITIVE_STEPS = [9999999999]
     NEGATIVE_STEPS = [9999999999]
     ITERATIONS = 5
@@ -67,8 +67,8 @@ class BaseExperiment:
     KERAS_ACTIVATIONS = ['relu', 'tanh']
     KERAS_OPTIMIZERS_LIST = ['adam']  # ['adam', 'adadelta', 'rmsprop']  # in most cases adam was better
     USE_CTR = False
-    LOG_TO_STDOUT = False
-    LOG_TO_TELEGRAM = True
+    LOG_TO_STDOUT = True
+    LOG_TO_TELEGRAM = False
 
     def get_dataset(self):
         raise NotImplementedError()
@@ -91,7 +91,7 @@ class BaseExperiment:
         keras_metrics = self.run_keras(keras_params)
         self.plot_metrics(catboost_metrics, keras_metrics)
         self.plot_metrics_diff(catboost_metrics, keras_metrics)
-        self.print_summary(catboost_metrics, keras_metrics)
+        self.print_summary(catboost_metrics, keras_metrics, keras_params)
         self.write_metrics(catboost_metrics, keras_metrics)
         self.log_progress('Finished')
 
@@ -102,6 +102,7 @@ class BaseExperiment:
             'accuracy': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'roc_auc': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'mean_prediction': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
+            'max_epochs': np.ones(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS)), dtype='int32'),
         }
         for i, positive in enumerate(tqdm(self.POSITIVE_STEPS, desc='Catboost')):
             self.log_progress(f'{i}/{len(self.POSITIVE_STEPS)}')
@@ -146,6 +147,7 @@ class BaseExperiment:
             'accuracy': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'roc_auc': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
             'mean_prediction': np.zeros(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS))),
+            'max_epochs': np.ones(shape=(len(self.NEGATIVE_STEPS), len(self.POSITIVE_STEPS)), dtype='int32'),
         }
         for i, positive in enumerate(tqdm(self.POSITIVE_STEPS, desc='Keras')):
             self.log_progress(f'{i}/{len(self.POSITIVE_STEPS)}')
@@ -154,6 +156,7 @@ class BaseExperiment:
                 acc = 0.0
                 roc_auc = 0.0
                 mean_pred = 0.0
+                max_epochs = 0
                 for iteration in range(self.ITERATIONS):
                     X, y, _ = self.get_balanced_dataset(dataset, positive, negative)
                     X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.25)
@@ -170,7 +173,7 @@ class BaseExperiment:
                             restore_best_weights=False,
                         )
                     ]
-                    model.fit(
+                    history = model.fit(
                         X_train, y_train,
                         epochs=self.KERAS_EPOCHS, validation_data=(X_valid, y_valid),
                         callbacks=callbacks, verbose=False,
@@ -180,11 +183,13 @@ class BaseExperiment:
                     acc += test_acc
                     roc_auc += test_auc
                     mean_pred += model.predict_classes(X_valid).mean()
+                    max_epochs = max(max_epochs, len(history.history))
                 
                 metrics['loss'][j, i] = loss / self.ITERATIONS
                 metrics['accuracy'][j, i] = acc / self.ITERATIONS
                 metrics['roc_auc'][j, i] = roc_auc / self.ITERATIONS
                 metrics['mean_prediction'][j, i] = mean_pred / self.ITERATIONS
+                metrics['max_epochs'][j, i] = max_epochs
         return metrics
 
     def transform_dataset_for_keras(self, dataset):
@@ -369,14 +374,14 @@ class BaseExperiment:
                 plt.text(j-0.45, i+0.15, f"auc={'+' if diff[i, j] > 0 else ''}{round(diff[i, j]*100, 1)}%")
         plt.savefig(f'experiments/plots/{self.__class__.__name__}_diff.png')
 
-    def print_summary(self, catboost_metrics, keras_metrics):
+    def print_summary(self, catboost_metrics, keras_metrics, keras_params):
         if not os.path.exists('experiments'):
             os.mkdir('experiments')
         if not os.path.exists('experiments/summaries'):
             os.mkdir('experiments/summaries')
         with open(f'experiments/summaries/{self.__class__.__name__}.txt', 'w') as f:
-            print('---- METRICS SUMMARY ----\n')
-            f.write('---- METRICS SUMMARY ----\n\n')
+            print('==== METRICS SUMMARY ====\n')
+            f.write('==== METRICS SUMMARY ====\n\n')
             for key in sorted(catboost_metrics):
                 if key == 'mean_prediction':
                     continue  # not a very intereting metric
@@ -388,8 +393,11 @@ class BaseExperiment:
                 keras_diff_sign = '+' if keras_diff >= 0.0 else ''
                 print(f'{key:>10}: catboost={catboost_value:.3f} ({catboost_diff_sign}{catboost_diff:.2f}%), keras={keras_value:.3f} ({keras_diff_sign}{keras_diff:.2f}%)\n')
                 f.write(f'{key:>10}: catboost={catboost_value:.3f} ({catboost_diff_sign}{catboost_diff:.2f}%), keras={keras_value:.3f} ({keras_diff_sign}{keras_diff:.2f}%)\n\n')
-            print('-------------------------')
-            f.write('-------------------------\n')
+            layer_sizes, activation, dropout, optimizer = keras_params
+            print(f'keras hyperparameters: layers={str(layer_sizes)}, activation={activation}, dropout={dropout}, optimizer={optimizer}')
+            f.write(f'keras hyperparameters: layers={str(layer_sizes)}, activation={activation}, dropout={dropout}, optimizer={optimizer}\n')
+            print('=========================')
+            f.write('=========================\n')
 
     def log_progress(self, message):
         caller_class = self.__class__.__name__
