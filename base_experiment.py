@@ -264,7 +264,7 @@ class BaseExperiment:
             # results = pool.imap_unordered(test_keras_parameters, all_param_tuples)
             results = pool.map(test_keras_parameters, all_param_tuples)
             for _i, result in enumerate(tqdm(results, total=len(parameter_tuples), desc='Tuning Keras')):
-                if _i % 24 == 0:
+                if _i % 4 == 0:
                     self.log_progress(f'{_i}/{len(parameter_tuples)}')
                 params_key, metrics = result
                 loss, acc, auc = metrics
