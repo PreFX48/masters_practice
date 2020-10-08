@@ -1,9 +1,9 @@
 ---- METRICS SUMMARY ----
 
-  accuracy: catboost=0.983 (-0.07%), keras=0.983 (+0.07%)
+  accuracy: catboost=0.983 (+0.08%), keras=0.982 (-0.08%)
 
-      loss: catboost=0.073 (-11.20%), keras=0.082 (+12.61%)
+      loss: catboost=0.071 (-16.23%), keras=0.085 (+19.38%)
 
-   roc_auc: catboost=0.834 (+9.97%), keras=0.758 (-9.06%)
+   roc_auc: catboost=0.847 (+8.28%), keras=0.782 (-7.65%)
 
 -------------------------
