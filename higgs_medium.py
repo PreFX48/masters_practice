@@ -7,8 +7,8 @@ from tensorflow import keras
 from base_experiment import BaseExperiment
 
 class HiggsMediumExperiment(BaseExperiment):
-    POSITIVE_STEPS = [12000, 25000, 50000, 105676]
-    NEGATIVE_STEPS = [12000, 25000, 50000, 94324]
+    POSITIVE_STEPS = [60000, 125000, 250000, 529673]
+    NEGATIVE_STEPS = [60000, 125000, 250000, 470327]
     PLOT_FIG_SIZE = (8, 10.67)
 
     def get_dataset(self):
