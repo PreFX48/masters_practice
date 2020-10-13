@@ -1,9 +1,12 @@
----- METRICS SUMMARY ----
+==== METRICS SUMMARY ====
 
-  accuracy: catboost=0.735 (+8.70%), keras=0.676 (-8.01%)
+  accuracy: catboost=0.747 (+5.99%), keras=0.705 (-5.66%)
 
-      loss: catboost=0.521 (-12.95%), keras=0.598 (+14.87%)
+      loss: catboost=0.504 (-11.12%), keras=0.567 (+12.51%)
 
-   roc_auc: catboost=0.816 (+9.54%), keras=0.745 (-8.71%)
+max_epochs: catboost=1.000 (-83.33%), keras=6.000 (+500.00%)
 
--------------------------
+   roc_auc: catboost=0.829 (+6.29%), keras=0.780 (-5.92%)
+
+keras hyperparameters: layers=(128, 160, 160, 128), activation=relu, dropout=0.2, optimizer=adam
+=========================
