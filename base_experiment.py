@@ -61,8 +61,8 @@ class BaseExperiment:
     PLOT_FIG_SIZE = (9, 12)
     KERAS_HYPERPARAMETER_WORKERS = 8
     KERAS_HYPERPARAMETER_ITERATIONS = 4
-    KERAS_LAYERS_RANGE = [2, 3, 4]
-    KERAS_LAYER_SIZE_RANGE = [32, 64, 128, 160]
+    KERAS_LAYERS_RANGE = [4, 5, 6]
+    KERAS_LAYER_SIZE_RANGE = [64, 128, 192, 256]
     KERAS_DROPOUT_RANGE = [0.2, 0.35, 0.5]
     KERAS_ACTIVATIONS = ['relu', 'tanh']
     KERAS_OPTIMIZERS_LIST = ['adam']  # ['adam', 'adadelta', 'rmsprop']  # in most cases adam was better
